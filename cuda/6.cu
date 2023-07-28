@@ -1,3 +1,5 @@
+//CUDA code corresponding to week6.cpp, applying artificial viscoity and perioidc boundary in my code
+
 #include <iostream>
 #include <cmath>
 #include <fstream>
@@ -8,6 +10,9 @@ using namespace std;
 #define LATTICE_WIDTH 50 //number of particles per row in the latticle initially
 #define LATTICE_HEIGHT 50 //number of particles per column in the latticle initially
 #define LATTICE_SIZE 2500 //total number of particles in the particle lattice
+
+#define NUM_BLOCKS 20 //number of launched blocks 
+#define NUM_THREADS_PER_BLOCK 125 //number of threads within a block
 
 
 struct Coordinates {
@@ -48,14 +53,23 @@ Coordinates lattice_init_square(int nx = LATTICE_WIDTH, int ny = LATTICE_HEIGHT)
     //initialization
     coordinates.number = LATTICE_SIZE;
     coordinates.dimensions = 2;
-    coordinates.timestep = 0;
-    coordinates.x_min = 0; // 0 in this case
-    coordinates.y_min = 0; // 0 in this case
+    coordinates.timestep = 0.0;
+    coordinates.x_min = 0.0; // 0 in this case
+    coordinates.y_min = 0.0; // 0 in this case
     coordinates.xbound = 1.0;
     coordinates.ybound = 1.0;
 
 
     for(int i = 0; i < LATTICE_SIZE; i++){
+        coordinates.vx[i] = 0.0;
+        coordinates.vy[i] = 0.0;
+        coordinates.dvxdt[i] = 0.0;
+        coordinates.dvydt[i] = 0.0;
+        coordinates.dudt[i] = 0.0;
+        coordinates.density[i] = 0.0;
+        coordinates.p[i] = 0.0;
+        coordinates.omega[i] = 0.0;
+        coordinates.temp_timestep[i] = 0.0;
         coordinates.u[i] = 1.0;
         coordinates.h[i] = 0.02; 
         coordinates.m[i] = 0.43; 
@@ -84,6 +98,7 @@ __global__ void calculate_density(Coordinates* d_out, Coordinates* d_in){// base
     
     int lattice_size = d_in->number;
     
+
     d_out->number = d_in->number;
     d_out->dimensions = d_in->dimensions;
     d_out->timestep = d_in->timestep;
@@ -109,8 +124,9 @@ __global__ void calculate_density(Coordinates* d_out, Coordinates* d_in){// base
     d_out->p[thread_id] = d_in->p[thread_id];
     d_out->omega[thread_id] = d_in->omega[thread_id];
     d_out->temp_timestep[thread_id] = d_in->temp_timestep[thread_id];
+    
 
-    double d = d_in->density[thread_id];
+    double d = 0.0;//d_in->density[thread_id];
     for(int i = 0; i < lattice_size; i++){
         d += (d_in->m[i] * cubic_spline_kernel_periodic(d_in->rx[thread_id], d_in->ry[thread_id], d_in->rx[i], d_in->ry[i], d_in->h[thread_id], d_in->dimensions, d_in->xbound, d_in->ybound));
     }
@@ -163,7 +179,7 @@ __global__ void setting_smoothing_length(Coordinates* d_out, Coordinates* d_in){
     f1 = mass * pow(1.2 / h0, dimensions) - density; //η = 1.2 in equation (2.46) in https://www.cs.mun.ca/~tstricco/papers/Tricco-phdthesis.pdf
 
     //calculate current Ω
-    omega = 1;
+    omega = 1.0;
     for (int i = 0; i < lattice_size; i++){ //first_derivative_kernel was implemented in tools.h
         omega += ((h0 * d_in->m[i] * first_derivative_kernel_periodic(d_in->rx[thread_id], d_in->ry[thread_id], d_in->rx[i], d_in->ry[i], h0, dimensions, d_in->xbound, d_in->ybound)) / (density * dimensions)); //euqation(27) and (28) in Price (2012)
     }
@@ -175,13 +191,13 @@ __global__ void setting_smoothing_length(Coordinates* d_out, Coordinates* d_in){
 
     while((fabs(h_new - h_old) / h0) >= 0.0001){
             
-        omega = 0;
-        density = 0;
+        omega = 0.0;
+        density = 0.0;
         for (int i = 0; i < lattice_size; i++){
             density += (d_in->m[i] * cubic_spline_kernel_periodic(d_in->rx[thread_id], d_in->ry[thread_id], d_in->rx[i], d_in->ry[i], h_new, dimensions, d_in->xbound, d_in->ybound)); // calculate density based on new h
             omega += (d_in->m[i] * first_derivative_kernel_periodic(d_in->rx[thread_id], d_in->ry[thread_id], d_in->rx[i], d_in->ry[i], h_new, dimensions, d_in->xbound, d_in->ybound)); // calculate omega based on new h  
         }
-        omega = 1 + (omega * h_new) / (density * dimensions);
+        omega = 1.0 + (omega * h_new) / (density * dimensions);
         
         d_out->density[thread_id] = density;
         d_out->omega[thread_id] = omega;
@@ -447,7 +463,6 @@ __global__ void leapfrog_secondhalf(Coordinates* d_out, Coordinates* d_in){
 }
 
 
-
 //write particle data to csv
 void write_file(){
     
@@ -481,21 +496,21 @@ int main(){
 
     cudaMemcpy(d_in, h_in, memory_size, cudaMemcpyHostToDevice);//data transfer from host to device
 
-    calculate_density<<<4, 625>>>(d_out, d_in);//Kernel function, calculate each particle's density. 4 blocks in total; 625 threads per block.
+    calculate_density<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_in);//Kernel function, calculate each particle's density. 4 blocks in total; 625 threads per block.
     cudaDeviceSynchronize();
     
-    setting_smoothing_length<<<4, 625>>>(d_out, d_out);//set smoothing length
+    setting_smoothing_length<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//set smoothing length
     cudaDeviceSynchronize();
 
-    calculate_dvdt_dudt<<<4, 625>>>(d_out, d_out);//calculate dv/dt and du/dt
+    calculate_dvdt_dudt<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//calculate dv/dt and du/dt
     cudaDeviceSynchronize();
 
-    update_timestep<<<4, 625>>>(d_out, d_out);//update value of timestep for each particle the first time
+    update_timestep<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//update value of timestep for each particle the first time
     cudaDeviceSynchronize();
 
     cudaMemcpy(h_out, d_out, memory_size, cudaMemcpyDeviceToHost); //data transfer from device to host
 
-    cudaFree(d_in); cudaFree(d_out);//free allocated device memory
+    //cudaFree(d_in); cudaFree(d_out);//free allocated device memory
 
     coordinates = *h_out; //get the contents of coordinates in host's end
 
@@ -513,35 +528,35 @@ int main(){
     for(int i = 0; i < 10; i++){
 
         //host memory
-        h_in = &coordinates;
-        h_out = new Coordinates;
+        // h_in = &coordinates;
+        // h_out = new Coordinates;
 
-        memory_size = sizeof(coordinates);
+        // memory_size = sizeof(coordinates);
 
         //allocate device memory
-        cudaMalloc((void**)&d_in, memory_size); 
-        cudaMalloc((void**)&d_out, memory_size);
+        // cudaMalloc((void**)&d_in, memory_size); 
+        // cudaMalloc((void**)&d_out, memory_size);
 
         cudaMemcpy(d_in, h_in, memory_size, cudaMemcpyHostToDevice);//data transfer from host to device
         
-        leapfrog_firsthalf<<<4, 625>>>(d_out, d_in);
+        leapfrog_firsthalf<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_in);
         cudaDeviceSynchronize();
 
-        calculate_density<<<4, 625>>>(d_out, d_out);//Kernel function, calculate each particle's density. 4 blocks in total; 625 threads per block.
+        calculate_density<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//Kernel function, calculate each particle's density. 4 blocks in total; 625 threads per block.
         cudaDeviceSynchronize();
         
-        setting_smoothing_length<<<4, 625>>>(d_out, d_out);//set smoothing length
+        setting_smoothing_length<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//set smoothing length
         cudaDeviceSynchronize();
 
-        calculate_dvdt_dudt<<<4, 625>>>(d_out, d_out);//calculate dv/dt and du/dt
+        calculate_dvdt_dudt<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//calculate dv/dt and du/dt
         cudaDeviceSynchronize();
 
-        update_timestep<<<4, 625>>>(d_out, d_out);//update value of timestep for each particle the first time
+        update_timestep<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_out);//update value of timestep for each particle the first time
         cudaDeviceSynchronize();
 
         cudaMemcpy(h_out, d_out, memory_size, cudaMemcpyDeviceToHost); //data transfer from device to host
 
-        cudaFree(d_in); cudaFree(d_out);//free allocated device memory
+        //cudaFree(d_in); cudaFree(d_out);//free allocated device memory
 
         coordinates = *h_out; //get the contents of coordinates in host's end
 
@@ -557,28 +572,29 @@ int main(){
         cout << coordinates.timestep << endl;//debug
 
         //host memory
-        h_in = &coordinates;
-        h_out = new Coordinates;
+        // h_in = &coordinates;
+        // h_out = new Coordinates;
 
-        memory_size = sizeof(coordinates);
+        // memory_size = sizeof(coordinates);
         
-        //allocate device memory
-        cudaMalloc((void**)&d_in, memory_size); 
-        cudaMalloc((void**)&d_out, memory_size);
+        // //allocate device memory
+        // cudaMalloc((void**)&d_in, memory_size); 
+        // cudaMalloc((void**)&d_out, memory_size);
 
         cudaMemcpy(d_in, h_in, memory_size, cudaMemcpyHostToDevice);//data transfer from host to device
 
-        leapfrog_secondhalf<<<4, 625>>>(d_out, d_in);
+        leapfrog_secondhalf<<<NUM_BLOCKS, NUM_THREADS_PER_BLOCK>>>(d_out, d_in);
         cudaDeviceSynchronize();
 
         cudaMemcpy(h_out, d_out, memory_size, cudaMemcpyDeviceToHost); //data transfer from device to host
 
-        cudaFree(d_in); cudaFree(d_out);//free allocated device memory
+        //cudaFree(d_in); cudaFree(d_out);//free allocated device memory
 
         coordinates = *h_out; //get the contents of coordinates in host's end
 
     }
 
+    cudaFree(d_in); cudaFree(d_out);//free allocated device memory
 
     write_file();//write particles' data to a csv file
     
